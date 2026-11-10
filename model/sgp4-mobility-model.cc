@@ -85,11 +85,13 @@ constexpr gravconsttype kWGeoSys = wgs72;
 double
 GmstRad(double unix_s)
 {
-    const double jd = UnixToJulian(unix_s);
-    const double T = (jd - 2451545.0) / 36525.0;
+    // Days since J2000.0 (2000-01-01 12:00 UTC = Unix 946728000), formed from the Unix time
+    // directly. Going through a full Julian date (about 2.46e6) first leaves only ~40 us of time
+    // resolution in a double, which made the Earth-fixed frame jitter by centimeters.
+    const double d = (unix_s - 946728000.0) / 86400.0;
+    const double T = d / 36525.0;
     // IAU 1982 formula (degrees) -> rad.
-    double gmst_deg = 280.46061837 + 360.98564736629 * (jd - 2451545.0) +
-                       T * T * (0.000387933 - T / 38710000.0);
+    double gmst_deg = 280.46061837 + 360.98564736629 * d + T * T * (0.000387933 - T / 38710000.0);
     double gmst_rad = std::fmod(gmst_deg * kDegToRad, kTwoPi);
     if (gmst_rad < 0.0)
         gmst_rad += kTwoPi;
@@ -212,7 +214,13 @@ Sgp4MobilityModel::Propagate(double unix_s, Vector& pos_eci, Vector& vel_eci)
     // ---- Full Vallado SGP4 path (drag/B* included) ----
     if (m_useVallado && m_vallado && m_vallado->ready)
     {
-        const double tsince_min = (UnixToJulian(unix_s) - m_vallado->rec.jdsatepoch) * 1440.0;
+        ++m_sgp4Calls;
+        // Minutes since the element-set epoch, from Unix times. The former
+        // (UnixToJulian(unix_s) - jdsatepoch) * 1440 lost the time to ~40 us in the Julian date
+        // (about 2.46e6 days in a double), so positions stepped by up to 0.3 m along track and any
+        // velocity taken from them by differences was off by decimeters per second.
+        const double epochUnix = (m_vallado->rec.jdsatepoch - 2440587.5) * 86400.0;
+        const double tsince_min = (unix_s - epochUnix) / 60.0;
         double r[3];
         double v[3];
         if (sgp4(kWGeoSys, m_vallado->rec, tsince_min, r, v) && m_vallado->rec.error == 0)
@@ -223,6 +231,10 @@ Sgp4MobilityModel::Propagate(double unix_s, Vector& pos_eci, Vector& vel_eci)
             vel_eci = Vector(v[0] * 1000.0, v[1] * 1000.0, v[2] * 1000.0);
             return;
         }
+        // CVC-12: count it. NS_LOG_WARN is compiled out of the optimized
+        // build, so this was a silent degradation: a run could stop being SGP4
+        // partway through a pass and still describe itself as SGP4.
+        ++m_sgp4Fallbacks;
         NS_LOG_WARN("sgp4 propagation failed (error " << m_vallado->rec.error
                                                       << "); falling back to Kepler+J2");
     }
@@ -301,7 +313,7 @@ Sgp4MobilityModel::EnsureCache() const
     {
         return;
     }
-    const double unix_s = m_elements.epoch_unix_s + now.GetSeconds();
+    const double unix_s = SimBaseUnix() + now.GetSeconds();
     Vector pos_eci;
     Vector vel_eci;
     Propagate(unix_s, pos_eci, vel_eci);
@@ -322,16 +334,31 @@ Vector
 Sgp4MobilityModel::GetEcefPosition() const
 {
     EnsureCache();
-    const double unix_s = m_elements.epoch_unix_s +
+    const double unix_s = SimBaseUnix() +
                             Simulator::Now().GetSeconds();
     return EciToEcef(m_cachedEci, unix_s);
+}
+
+void
+Sgp4MobilityModel::GetEcefStateAt(Time offset, Vector& posEcef, Vector& velEcef) const
+{
+    const double unix_s =
+        SimBaseUnix() + Simulator::Now().GetSeconds() + offset.GetSeconds();
+    Vector posEci;
+    Vector velEci;
+    Propagate(unix_s, posEci, velEci);
+    posEcef = EciToEcef(posEci, unix_s);
+    // v_ecef = R(v_eci) - omega x r_ecef, the same transport GetEcefVelocity uses.
+    const Vector vRot = EciToEcef(velEci, unix_s);
+    const double w = kEarthRotationRadS;
+    velEcef = Vector(vRot.x + w * posEcef.y, vRot.y - w * posEcef.x, vRot.z);
 }
 
 Vector
 Sgp4MobilityModel::GetEcefVelocity() const
 {
     EnsureCache();
-    const double unix_s = m_elements.epoch_unix_s +
+    const double unix_s = SimBaseUnix() +
                             Simulator::Now().GetSeconds();
     // ECEF velocity = R(ECI->ECEF) * vel_eci - omega x r_ecef
     Vector v_eci_in_ecef = EciToEcef(m_cachedEciVel, unix_s);
@@ -445,5 +472,14 @@ Sgp4MobilityModel::DoGetGeocentricPosition() const
     return DoGetPosition();
 }
 
+std::string
+Sgp4MobilityModel::GetPropagatorName() const
+{
+    // Delegate rather than re-derive: IsUsingSgp4() already owns this decision,
+    // and two copies of it would be free to drift apart.
+    return IsUsingSgp4() ? "sgp4-vallado" : "kepler-j2";
+}
+
 } // namespace ntncon
+
 } // namespace ns3

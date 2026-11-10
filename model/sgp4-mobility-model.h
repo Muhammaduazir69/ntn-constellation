@@ -36,7 +36,10 @@
 #include "ns3/mobility-model.h"
 #include "ns3/nstime.h"
 
+#include <cmath>
+#include <limits>
 #include <memory>
+#include <string>
 
 namespace ns3
 {
@@ -102,6 +105,18 @@ class Sgp4MobilityModel : public GeocentricConstantPositionMobilityModel
     /// comparing SGP4 against itself.
     bool IsUsingSgp4() const;
 
+    /// Anchor simulation time zero at an absolute UTC instant (Unix
+    /// seconds). By default time zero is the element set's own epoch, which
+    /// is what a Walker shell built from one epoch wants. Satellites loaded
+    /// from real element sets each carry their own epoch, so a constellation
+    /// of them is only consistent when every satellite is anchored to the
+    /// same instant.
+    void SetSimulationEpochUnix(double unixS) { m_simEpochUnixS = unixS; m_cacheValid = false; }
+    double SimBaseUnix() const
+    {
+        return std::isnan(m_simEpochUnixS) ? m_elements.epoch_unix_s : m_simEpochUnixS;
+    }
+
     /// Read-only access to the installed elements.
     const KeplerianElements& GetElements() const { return m_elements; }
 
@@ -118,9 +133,46 @@ class Sgp4MobilityModel : public GeocentricConstantPositionMobilityModel
     /// ECEF velocity (m/s).
     Vector GetEcefVelocity() const;
 
+    /// ECEF position and velocity at Simulator::Now() + \p offset, from the
+    /// same propagator GetPosition() uses, without touching the position cache.
+    ///
+    /// A study of prediction error needs the orbit the satellite will actually
+    /// fly, evaluated at a future instant, to compare against what a predictor
+    /// expected. Reading GetPosition() after the simulator has advanced gives
+    /// the same answer but only one instant at a time, and only once the
+    /// instant has passed. This returns it on demand.
+    void GetEcefStateAt(Time offset, Vector& posEcef, Vector& velEcef) const;
+
     /// Geodetic latitude / longitude / altitude (deg, deg, m above WGS-84
     /// reference ellipsoid).
     void GetGeodetic(double& lat_deg, double& lon_deg, double& alt_m) const;
+    /**
+     * \brief Which propagator this object will actually use, as a short tag.
+     *
+     * CVC-12. The class is named Sgp4MobilityModel, but it only runs Vallado
+     * SGP4 when it was initialized from a TLE. Initialized from Keplerian
+     * elements, which is what every Walker-generated shell does, it propagates
+     * with a Kepler + J2 secular model instead. Both are legitimate; naming
+     * only the first one in a caption is not. Scenarios and health records read
+     * this so the claim in the output matches the code that produced it.
+     *
+     * \return "sgp4-vallado" or "kepler-j2".
+     */
+    std::string GetPropagatorName() const;
+
+    /// CVC-12: Vallado propagation calls attempted (0 on the Kepler+J2 path).
+    uint64_t GetSgp4CallCount() const { return m_sgp4Calls; }
+
+    /**
+     * \brief Times the Vallado path failed mid-run and fell back to Kepler+J2.
+     *
+     * The fallback used to be an NS_LOG_WARN, which the optimized build
+     * compiles out, so a run could silently stop being SGP4 partway through a
+     * pass and still report itself as SGP4. Non-zero here means exactly that
+     * happened.
+     */
+    uint64_t GetSgp4FallbackCount() const { return m_sgp4Fallbacks; }
+
 
     /// Elevation angle (deg) from a ground station at (lat_deg, lon_deg)
     /// at the current sim time. Returns a value < 0 when the satellite is
@@ -174,6 +226,12 @@ class Sgp4MobilityModel : public GeocentricConstantPositionMobilityModel
     /// IsValladoReady() to find out which propagator a given object is on.
     bool m_useVallado{true};
     std::shared_ptr<ValladoState> m_vallado;
+    /// CVC-12: how many times the Vallado path was asked and answered.
+    mutable uint64_t m_sgp4Calls{0};
+    /// CVC-12: how many times it failed mid-run and silently fell back.
+    mutable uint64_t m_sgp4Fallbacks{0};
+
+    double m_simEpochUnixS{std::numeric_limits<double>::quiet_NaN()}; //!< see SetSimulationEpochUnix
 
     // Cache.
     mutable bool m_cacheValid{false};
