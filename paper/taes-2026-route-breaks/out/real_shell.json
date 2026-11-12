@@ -1,0 +1,13 @@
+{
+ "shell_sats": 3306,
+ "pairs": 300,
+ "period_s": 5630.626530925251,
+ "cap_km": 1700.0,
+ "range_err_km_median": 2.371456379814299,
+ "range_err_km_p95": 25.35749306213391,
+ "range_err_km_max": 54.569872125319904,
+ "events_true": 20,
+ "events_pred": 20,
+ "epoch_err_s_median": 41.5,
+ "epoch_err_s_p95": 291.20000000000005
+}

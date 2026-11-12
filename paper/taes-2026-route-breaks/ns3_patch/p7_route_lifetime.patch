@@ -1,0 +1,1400 @@
+--- orig/contact-graph-scheduler.h	2026-11-04 01:07:19.017044918 +0500
++++ contact-graph-scheduler.h	2026-11-09 02:29:04.618225696 +0500
+@@ -124,6 +124,13 @@
+     /// Register a ground station at (lat, lon, alt=0 m MSL).
+     void RegisterGroundStation(uint32_t id, double lat_deg, double lon_deg);
+ 
++    /// P7: the ground links that can occur in the run. With a list set, only these are sampled, and a
++    /// satellite well below the mask is skipped until it could first reach it at the rate bound below;
++    /// transitions still land on the same sampling grid.
++    void SetGslCandidates(const std::vector<std::pair<uint32_t, uint32_t>>& satGs);
++    /// P7: refresh the candidate ISLs only every k-th tick (k = 1 is the original behavior).
++    void SetIslRefreshEvery(uint32_t k) { m_islEvery = k; }
++
+     /// Start the periodic visibility sampler. Schedules through the
+     /// Simulator::Schedule path; the user only needs to call Stop() when
+     /// the scenario is over (the scheduler itself does not stop the
+@@ -200,6 +207,21 @@
+     std::map<std::pair<uint32_t, uint32_t>, bool> m_gslState;
+     std::map<std::pair<uint32_t, uint32_t>, bool> m_islState;
+ 
++    struct GslCand
++    {
++        uint32_t sat;
++        uint32_t gs;
++        Ptr<Sgp4MobilityModel> mob;
++        double latDeg;
++        double lonDeg;
++        Vector gsEcef;
++        bool up{false};
++        double nextCheck{0.0};
++    };
++    std::vector<GslCand> m_gslCand;
++    uint32_t m_islEvery{1};
++    uint64_t m_tickN{0};
++
+     uint64_t m_gslUp{0};
+     uint64_t m_gslDown{0};
+     uint64_t m_islUp{0};
+--- orig/contact-graph-scheduler.cc	2026-11-04 01:07:19.017118785 +0500
++++ contact-graph-scheduler.cc	2026-11-09 02:29:04.618748275 +0500
+@@ -15,13 +15,23 @@
+ namespace ntncon
+ {
+ 
++#ifdef P7_STANDALONE
++NS_LOG_COMPONENT_DEFINE("ContactGraphSchedulerP7");
++#else
+ NS_LOG_COMPONENT_DEFINE("ContactGraphScheduler");
++#endif
+ NS_OBJECT_ENSURE_REGISTERED(ContactGraphScheduler);
+ 
+ TypeId
+ ContactGraphScheduler::GetTypeId()
+ {
+-    static TypeId tid = TypeId("ns3::ntncon::ContactGraphScheduler")
++    static TypeId tid = TypeId(
++#ifdef P7_STANDALONE
++                                   "ns3::ntncon::ContactGraphSchedulerP7"
++#else
++                                   "ns3::ntncon::ContactGraphScheduler"
++#endif
++                                   )
+                             .SetParent<Object>()
+                             .SetGroupName("NtnConstellation")
+                             .AddConstructor<ContactGraphScheduler>()
+@@ -96,6 +106,29 @@
+ }
+ 
+ void
++ContactGraphScheduler::SetGslCandidates(const std::vector<std::pair<uint32_t, uint32_t>>& satGs)
++{
++    m_gslCand.clear();
++    for (const auto& [s, gsId] : satGs)
++    {
++        const auto& g = m_gss.at(gsId);
++        const double lat = g.lat_deg * M_PI / 180.0;
++        const double lon = g.lon_deg * M_PI / 180.0;
++        const double Ngs = kEarthRadiusM / std::sqrt(1.0 - kWgs84E2 * std::sin(lat) * std::sin(lat));
++        GslCand gc;
++        gc.sat = s;
++        gc.gs = gsId;
++        gc.mob = m_sats.at(s);
++        gc.latDeg = g.lat_deg;
++        gc.lonDeg = g.lon_deg;
++        gc.gsEcef = Vector(Ngs * std::cos(lat) * std::cos(lon),
++                           Ngs * std::cos(lat) * std::sin(lon),
++                           Ngs * (1.0 - kWgs84E2) * std::sin(lat));
++        m_gslCand.push_back(gc);
++    }
++}
++
++void
+ ContactGraphScheduler::Start()
+ {
+     m_running = true;
+@@ -290,7 +323,55 @@
+     }
+     const double t = Simulator::Now().GetSeconds();
+ 
+-    // GSL visibility.
++    // P7: sparse GSL sampling. Elevation changes no faster than kMaxElevRate deg/s at any LEO altitude
++    // used here (0.9 deg/s overhead at 460 km), so a satellite e degrees below the mask cannot cross it
++    // for (e / rate) seconds. Decisions stay on the sampling grid and match the full scan.
++    constexpr double kMaxElevRate = 2.0;
++    for (auto& c : m_gslCand)
++    {
++        if (!c.up && t < c.nextCheck)
++        {
++            continue;
++        }
++        const double elev = c.mob->GetElevationDeg(c.latDeg, c.lonDeg);
++        const bool visible = c.up ? (elev >= m_minElevDeg - m_gateHysteresisDeg) : (elev >= m_minElevDeg);
++        if (!visible)
++        {
++            c.nextCheck = t + std::max(0.0, (m_minElevDeg - elev) / kMaxElevRate - 0.2);
++        }
++        if (!visible && !c.up)
++        {
++            continue;
++        }
++        const Vector p = c.mob->GetEcefPosition();
++        const double dx = p.x - c.gsEcef.x;
++        const double dy = p.y - c.gsEcef.y;
++        const double dz = p.z - c.gsEcef.z;
++        const double range = std::sqrt(dx * dx + dy * dy + dz * dz);
++        ContactEvent ev{t, c.sat, c.gs, false, visible, range, elev};
++        if (visible != c.up)
++        {
++            c.up = visible;
++            m_gslState[{c.sat, c.gs}] = visible;
++            if (visible)
++            {
++                ++m_gslUp;
++                m_contactUp(ev);
++            }
++            else
++            {
++                ++m_gslDown;
++                m_contactDown(ev);
++            }
++        }
++        else if (visible)
++        {
++            m_contactUpdate(ev);
++        }
++    }
++
++    // GSL visibility (full scan when no candidate list was set).
++    if (m_gslCand.empty())
+     for (auto& gsIt : m_gss)
+     {
+         for (auto& satIt : m_sats)
+@@ -352,7 +433,11 @@
+ 
+     // ISL visibility (sat pair Euclidean range): candidate pairs when the
+     // topology is terminal-limited, otherwise every pair.
+-    if (!m_islCandidates.empty())
++    if (!m_islCandidates.empty() && (m_tickN++ % m_islEvery != 0))
++    {
++        // P7: not this tick
++    }
++    else if (!m_islCandidates.empty())
+     {
+         for (const auto& [a, b] : m_islCandidates)
+         {
+--- orig/contact-graph-router.h	2026-11-04 01:07:19.016881782 +0500
++++ contact-graph-router.h	2026-11-09 02:29:04.653224735 +0500
+@@ -97,6 +97,10 @@
+                                               uint32_t dst,
+                                               const EdgeFilter& keep) const;
+ 
++    /// P7: Dijkstra with an edge cost computed from (u, v, weight); returned total_weight is the true weight sum.
++    using EdgeCost = std::function<double(uint32_t, uint32_t, double)>;
++    WeightedPath ShortestPathCost(uint32_t src, uint32_t dst, const EdgeCost& cost) const;
++
+     /**
+      * \brief Longest-lived path within a delay stretch of the shortest one.
+      *
+@@ -192,6 +196,17 @@
+                          : std::pair<uint32_t, uint32_t>{b, a};
+     }
+ 
++    /// P7: flat adjacency for Dijkstra and for weight lookups, neighbors kept in ascending order so ties
++    /// resolve as in the map-based version. m_adj and m_edges stay for the rest of the interface.
++    std::vector<std::vector<std::pair<uint32_t, double>>> m_flat;
++    mutable std::vector<double> m_dist;
++    mutable std::vector<uint32_t> m_pred;
++    mutable std::vector<uint32_t> m_stamp;
++    mutable uint32_t m_stampNow{0};
++    void FlatAdd(uint32_t a, uint32_t b, double w);
++    void FlatErase(uint32_t a, uint32_t b);
++    void FlatSet(uint32_t a, uint32_t b, double w);
++
+     /// Adjacency map: node -> set of neighbours.
+     std::map<uint32_t, std::set<uint32_t>> m_adj;
+     /// Set of canonical (low, high) edge IDs currently up.
+--- orig/contact-graph-router.cc	2026-11-04 01:07:19.016967450 +0500
++++ contact-graph-router.cc	2026-11-09 02:29:04.653398675 +0500
+@@ -4,6 +4,7 @@
+ 
+ #include "contact-graph-router.h"
+ 
++#include <cmath>
+ #include <limits>
+ 
+ #include <set>
+@@ -20,13 +21,23 @@
+ namespace ntncon
+ {
+ 
++#ifdef P7_STANDALONE
++NS_LOG_COMPONENT_DEFINE("ContactGraphRouterP7");
++#else
+ NS_LOG_COMPONENT_DEFINE("ContactGraphRouter");
++#endif
+ NS_OBJECT_ENSURE_REGISTERED(ContactGraphRouter);
+ 
+ TypeId
+ ContactGraphRouter::GetTypeId()
+ {
+-    static TypeId tid = TypeId("ns3::ntncon::ContactGraphRouter")
++    static TypeId tid = TypeId(
++#ifdef P7_STANDALONE
++                                   "ns3::ntncon::ContactGraphRouterP7"
++#else
++                                   "ns3::ntncon::ContactGraphRouter"
++#endif
++                                   )
+                             .SetParent<Object>()
+                             .SetGroupName("NtnConstellation")
+                             .AddConstructor<ContactGraphRouter>();
+@@ -56,17 +67,61 @@
+ }
+ 
+ void
++ContactGraphRouter::FlatAdd(uint32_t a, uint32_t b, double w)
++{
++    if (m_flat.size() <= a)
++    {
++        m_flat.resize(a + 1);
++    }
++    auto& v = m_flat[a];
++    auto it = std::lower_bound(v.begin(), v.end(), std::make_pair(b, -1e300));
++    if (it != v.end() && it->first == b)
++    {
++        it->second = w;
++    }
++    else
++    {
++        v.insert(it, {b, w});
++    }
++}
++
++void
++ContactGraphRouter::FlatErase(uint32_t a, uint32_t b)
++{
++    if (a >= m_flat.size())
++    {
++        return;
++    }
++    auto& v = m_flat[a];
++    v.erase(std::remove_if(v.begin(), v.end(), [b](const auto& x) { return x.first == b; }), v.end());
++}
++
++void
++ContactGraphRouter::FlatSet(uint32_t a, uint32_t b, double w)
++{
++    if (a >= m_flat.size())
++    {
++        return;
++    }
++    for (auto& x : m_flat[a])
++    {
++        if (x.first == b)
++        {
++            x.second = w;
++            return;
++        }
++    }
++}
++
++void
+ ContactGraphRouter::UpdateEdgeWeight(const ContactEvent& ev)
+ {
+     // Refresh the weight of an edge that is already in the graph. Deliberately
+     // does NOT insert: an update for an edge we never saw come up would mean
+     // the transition traces and this one disagree, and silently inventing the
+     // edge would hide that.
+-    const auto key = CanonicalEdge(ev.node_a, ev.node_b);
+-    if (m_edges.count(key) != 0)
+-    {
+-        m_edgeWeights[key] = ev.range_m;
+-    }
++    FlatSet(ev.node_a, ev.node_b, ev.range_m);
++    FlatSet(ev.node_b, ev.node_a, ev.range_m);
+ }
+ 
+ void
+@@ -85,6 +140,8 @@
+         // Seed the weight from the contact-up range; OnContactUpdate keeps
+         // it current for the rest of the pass.
+         m_edgeWeights[key] = ev.range_m;
++        FlatAdd(ev.node_a, ev.node_b, ev.range_m);
++        FlatAdd(ev.node_b, ev.node_a, ev.range_m);
+     }
+     else
+     {
+@@ -96,13 +153,15 @@
+             ++m_removed;
+         }
+         m_edgeWeights.erase(key);
++        FlatErase(ev.node_a, ev.node_b);
++        FlatErase(ev.node_b, ev.node_a);
+     }
+ }
+ 
+ bool
+ ContactGraphRouter::HasEdge(uint32_t a, uint32_t b) const
+ {
+-    return m_edges.count(CanonicalEdge(a, b)) != 0;
++    return !std::isnan(EdgeWeight(a, b));
+ }
+ 
+ size_t
+@@ -121,12 +180,17 @@
+ double
+ ContactGraphRouter::EdgeWeight(uint32_t a, uint32_t b) const
+ {
+-    auto it = m_edgeWeights.find(CanonicalEdge(a, b));
+-    if (it == m_edgeWeights.end())
++    if (a < m_flat.size())
+     {
+-        return std::numeric_limits<double>::quiet_NaN();
++        for (const auto& x : m_flat[a])
++        {
++            if (x.first == b)
++            {
++                return x.second;
++            }
++        }
+     }
+-    return it->second;
++    return std::numeric_limits<double>::quiet_NaN();
+ }
+ 
+ void
+@@ -355,13 +419,25 @@
+     {
+         return {{src}, 0.0};
+     }
+-    // Dijkstra. dist[node] = shortest known weight from src.
+-    std::map<uint32_t, double> dist;
+-    std::map<uint32_t, uint32_t> pred;
++    // Dijkstra over the flat adjacency; same relaxation order and tie rule as the map version.
++    const size_t n = m_flat.size();
++    if (src >= n || dst >= n)
++    {
++        return {{}, std::numeric_limits<double>::infinity()};
++    }
++    if (m_dist.size() < n)
++    {
++        m_dist.resize(n);
++        m_pred.resize(n);
++        m_stamp.assign(n, 0);
++        m_stampNow = 0;
++    }
++    ++m_stampNow;
++    const uint32_t st = m_stampNow;
+     using QEntry = std::pair<double, uint32_t>; // (weight, node)
+-    std::priority_queue<QEntry, std::vector<QEntry>, std::greater<QEntry>>
+-        pq;
+-    dist[src] = 0.0;
++    std::priority_queue<QEntry, std::vector<QEntry>, std::greater<QEntry>> pq;
++    m_dist[src] = 0.0;
++    m_stamp[src] = st;
+     pq.push({0.0, src});
+     while (!pq.empty())
+     {
+@@ -369,45 +445,97 @@
+         pq.pop();
+         if (u == dst)
+         {
+-            // Reconstruct path.
+             std::vector<uint32_t> path{dst};
+             uint32_t c = dst;
+             while (c != src)
+             {
+-                c = pred.at(c);
++                c = m_pred[c];
+                 path.push_back(c);
+             }
+             std::reverse(path.begin(), path.end());
+             return {std::move(path), w};
+         }
+-        auto dit = dist.find(u);
+-        if (dit == dist.end() || w > dit->second)
++        if (w > m_dist[u])
+         {
+             continue; // stale
+         }
+-        auto nbIt = m_adj.find(u);
+-        if (nbIt == m_adj.end())
++        for (const auto& [v, we] : m_flat[u])
+         {
+-            continue;
++            if (keep && !keep(u, v))
++            {
++                continue;
++            }
++            const double newW = w + we;
++            if (m_stamp[v] != st || newW < m_dist[v])
++            {
++                m_stamp[v] = st;
++                m_dist[v] = newW;
++                m_pred[v] = u;
++                pq.push({newW, v});
++            }
+         }
+-        for (uint32_t v : nbIt->second)
++    }
++    return {{}, std::numeric_limits<double>::infinity()};
++}
++
++ContactGraphRouter::WeightedPath
++ContactGraphRouter::ShortestPathCost(uint32_t src, uint32_t dst, const EdgeCost& cost) const
++{
++    ++m_queries;
++    const size_t n = m_flat.size();
++    if (src >= n || dst >= n)
++    {
++        return {{}, std::numeric_limits<double>::infinity()};
++    }
++    if (m_dist.size() < n)
++    {
++        m_dist.resize(n);
++        m_pred.resize(n);
++        m_stamp.assign(n, 0);
++        m_stampNow = 0;
++    }
++    ++m_stampNow;
++    const uint32_t st = m_stampNow;
++    using QEntry = std::pair<double, uint32_t>;
++    std::priority_queue<QEntry, std::vector<QEntry>, std::greater<QEntry>> pq;
++    m_dist[src] = 0.0;
++    m_stamp[src] = st;
++    pq.push({0.0, src});
++    while (!pq.empty())
++    {
++        const auto [w, u] = pq.top();
++        pq.pop();
++        if (u == dst)
+         {
+-            const auto wEdge =
+-                m_edgeWeights.find(CanonicalEdge(u, v));
+-            if (wEdge == m_edgeWeights.end())
++            std::vector<uint32_t> path{dst};
++            uint32_t c = dst;
++            double total = 0.0;
++            while (c != src)
+             {
+-                continue; // edge raced out
++                total += EdgeWeight(c, m_pred[c]);
++                c = m_pred[c];
++                path.push_back(c);
+             }
+-            if (keep && !keep(u, v))
++            std::reverse(path.begin(), path.end());
++            return {std::move(path), total};
++        }
++        if (w > m_dist[u])
++        {
++            continue;
++        }
++        for (const auto& [v, we] : m_flat[u])
++        {
++            const double ce = cost(u, v, we);
++            if (!std::isfinite(ce))
+             {
+                 continue;
+             }
+-            const double newW = w + wEdge->second;
+-            auto dvIt = dist.find(v);
+-            if (dvIt == dist.end() || newW < dvIt->second)
++            const double newW = w + ce;
++            if (m_stamp[v] != st || newW < m_dist[v])
+             {
+-                dist[v] = newW;
+-                pred[v] = u;
++                m_stamp[v] = st;
++                m_dist[v] = newW;
++                m_pred[v] = u;
+                 pq.push({newW, v});
+             }
+         }
+--- orig/ntn-constellation-route-lifetime.cc	2026-11-04 01:07:19.016758030 +0500
++++ ntn-constellation-route-lifetime.cc	2026-11-09 02:29:04.652979226 +0500
+@@ -24,14 +24,19 @@
+  *             up for the whole window (merged snapshots, ASR-LSA style)
+  *   life      longest-lived path within (1 + --eps) of the shortest delay,
+  *             switched --guard seconds before its predicted expiry
++ * Added for paper 7 (Nov 2026):
++ *   asrk      merged snapshot that keeps a route that still lasts the window
++ *   track     Algorithm 1 on residual times estimated from a 30 s elevation track
++ *   alpr      average-latency persistent routing of Bhattacharjee et al. (eq. 13)
++ *   isasr     stability and activeness slotted routing of Bhattacharjee et al. (eq. 14-15)
+  *
+  * Usage:
+  *   ./ns3 run "ntn-constellation-route-lifetime --policy=life --eps=0.05"
+  */
+ 
+ #include "ns3/applications-module.h"
+-#include "ns3/contact-graph-router.h"
+-#include "ns3/contact-graph-scheduler.h"
++#include "contact-graph-router.h"
++#include "contact-graph-scheduler.h"
+ #include "ns3/core-module.h"
+ #include "ns3/internet-module.h"
+ #include "ns3/network-module.h"
+@@ -39,7 +44,11 @@
+ #include "ns3/sgp4-mobility-model.h"
+ #include "ns3/walker-constellation.h"
+ 
++#include <sys/resource.h>
++#include <time.h>
++
+ #include <algorithm>
++#include <fstream>
+ #include <cmath>
+ #include <iostream>
+ #include <map>
+@@ -95,6 +104,8 @@
+     std::vector<uint32_t> path;
+     std::set<Edge> pathEdges;
+     std::map<Edge, double> endCache; // absolute predicted contact end (s)
++    std::map<Edge, double> satCache; // link with no end within the horizon: time of that prediction
++    double satRecheck{900.0};
+     std::string policy;
+     double period{1.0};
+     double detect{0.05};
+@@ -124,13 +135,78 @@
+     std::vector<double> stretch;
+     std::vector<double> delays;
+     uint64_t rx{0};
++    // ---- paper 7 additions
++    bool noData{false};
++    bool bbm{false};                   // one terminal per gateway: the old ground link stops when acquisition starts
++    double fallbackEps{0.10};          // asr, asrk: stretch bound of the fallback route
++    double keepEps{1e9};               // asrk: keep a route only while its stretch is within this
++    double trackArc{30.0};             // track: arc of the elevation track (s)
++    double gammaIsasr{1.0};            // isasr: gamma of eq. 14 (dimensionless)
++    bool proactive{true};              // alpr, isasr: start the switch g + tAcq before the known end
++    bool logEvents{false};
++    uint64_t ingressChanges{0}, egressChanges{0}, islOnlyChanges{0}, acquisitions{0};
++    uint64_t breaksIn{0}, breaksOut{0}, breaksIsl{0};
++    uint64_t holdSwitches{0};
++    double ageSum{0.0}, lastInstall{-1.0};
++    uint64_t ageN{0};
++    double resInSum{0.0}, resOutSum{0.0};
++    uint64_t resN{0};
++    double searchCpu{0.0};
++    uint64_t searchN{0};
++    std::set<Edge> blocked;
++    std::map<Edge, double> trackCache;
++    uint64_t trackEvals{0};
++    std::set<Edge> isasrZeroAct;
++    bool isasrIslAct{false};
++    double elevNoiseDeg{0.0};
++    uint32_t trackSamples{3};
++    double floorGrid{5.0};
++    Ptr<NormalRandomVariable> noise;
++    std::map<std::pair<uint32_t, uint32_t>, double> elevReading; // one reading per link per decision
++    uint64_t trackBad{0};
++    uint64_t fallbackUsed{0};
++    uint64_t mergedDecisions{0};
++    uint64_t noAdmissible{0};
++    double routeLenSum{0.0};
++    uint64_t routeLenN{0};
++    double trackErrAbsSum{0.0};
++    uint64_t trackErrN{0};
++    double dropDeg{23.0};
+ } g;
+ 
+ double
++ThreadCpu()
++{
++    timespec ts;
++    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
++    return ts.tv_sec + 1e-9 * ts.tv_nsec;
++}
++
++void Log(const std::string& what)
++{
++    if (g.logEvents)
++    {
++        std::cerr << Simulator::Now().GetSeconds() << " " << what << "\n";
++    }
++}
++
++std::string PathStr(const std::vector<uint32_t>& p)
++{
++    std::ostringstream o;
++    for (auto v : p) o << v << " ";
++    return o.str();
++}
++
++double
+ Residual(uint32_t a, uint32_t b)
+ {
+     const Edge e = Canon(a, b);
+     const double now = Simulator::Now().GetSeconds();
++    auto sat = g.satCache.find(e);
++    if (sat != g.satCache.end() && now - sat->second < g.satRecheck)
++    {
++        return g.horizon; // no end within the horizon at the last look; it does not age
++    }
+     auto it = g.endCache.find(e);
+     if (it != g.endCache.end() && it->second > now)
+     {
+@@ -140,7 +216,16 @@
+     ++g.predictions;
+     const double r =
+         g.predSched->PredictContactEndS(e.first, e.second, isl, g.horizon, isl ? 30.0 : 5.0);
+-    g.endCache[e] = now + r;
++    if (r >= g.horizon)
++    {
++        g.satCache[e] = now;
++        g.endCache.erase(e);
++    }
++    else
++    {
++        g.satCache.erase(e);
++        g.endCache[e] = now + r;
++    }
+     return r;
+ }
+ 
+@@ -158,9 +243,55 @@
+     }
+ }
+ 
++void Unblock();
++
++void
++CountChange(const std::vector<uint32_t>& p)
++{
++    const double now = Simulator::Now().GetSeconds();
++    if (!g.path.empty() && p != g.path)
++    {
++        const bool in = p[1] != g.path[1];
++        const bool out = p[p.size() - 2] != g.path[g.path.size() - 2];
++        g.ingressChanges += in;
++        g.egressChanges += out;
++        g.islOnlyChanges += (!in && !out);
++        g.acquisitions += (in || out);
++        if (g.lastInstall >= 0)
++        {
++            g.ageSum += now - g.lastInstall;
++            ++g.ageN;
++        }
++    }
++    g.lastInstall = now;
++    if (p.size() >= 3)
++    {
++        const double h = g.horizon;
++        g.resInSum += std::min(h, g.predSched->PredictContactEndS(p[1], g.gsA, false, h, 5.0));
++        g.resOutSum += std::min(h, g.predSched->PredictContactEndS(p[p.size() - 2], g.gsB, false, h, 5.0));
++        ++g.resN;
++    }
++}
++
+ void
+ InstallPath(const std::vector<uint32_t>& p)
+ {
++    Log("install " + PathStr(p));
++    CountChange(p);
++    if (g.noData)
++    {
++        if (!g.path.empty() && p != g.path)
++        {
++            ++g.changes;
++        }
++        g.path = p;
++        g.pathEdges.clear();
++        for (size_t k = 0; k + 1 < p.size(); ++k)
++        {
++            g.pathEdges.insert(Canon(p[k], p[k + 1]));
++        }
++        return;
++    }
+     Ipv4StaticRoutingHelper srh;
+     // Nodes that stay on the path get their next hop replaced now. Nodes that
+     // leave it keep their old entry for a drain time longer than any path
+@@ -209,6 +340,7 @@
+     {
+         g.pathEdges.insert(Canon(p[k], p[k + 1]));
+     }
++    Unblock();
+ }
+ 
+ bool
+@@ -258,6 +390,22 @@
+     g.pendingInstall.Cancel();
+     if (g.tAcq > 0 && newGround && !g.path.empty())
+     {
++        if (g.bbm && !g.noData)
++        {
++            // One terminal per gateway: the terminal that must slew stops serving its old link now.
++            const Edge oldIn = Canon(g.path[1], g.gsA);
++            const Edge oldOut = Canon(g.path[g.path.size() - 2], g.gsB);
++            for (const Edge& oe : {oldIn, oldOut})
++            {
++                const Edge ne = oe.second == g.gsA ? Canon(p[1], g.gsA) : Canon(p[p.size() - 2], g.gsB);
++                if (oe != ne && g.links.count(oe))
++                {
++                    g.links.at(oe).emA->SetRate(1.0);
++                    g.links.at(oe).emB->SetRate(1.0);
++                    g.blocked.insert(oe);
++                }
++            }
++        }
+         g.pendingPath = p;
+         g.pendingInstall = Simulator::Schedule(Seconds(g.tAcq), [p]() {
+             if (PathUp(p))
+@@ -276,22 +424,164 @@
+ 
+ void Recompute();
+ 
+-/// Elevation (deg) of satellite s seen from ground station gs (WGS84, geodetic up).
++/// Elevation (deg) of satellite s seen from ground station gs (WGS84, geodetic up), offset s from now.
+ double
+-ElevDeg(uint32_t s, uint32_t gs)
++ElevDeg(uint32_t s, uint32_t gs, double offset = 0.0)
+ {
+     const int k = gs == g.gsA ? 0 : 1;
+     const double la = g.gsLat[k] * M_PI / 180, lo = g.gsLon[k] * M_PI / 180;
+     const double a = 6378137.0, e2 = 6.69437999014e-3;
+     const double nn = a / std::sqrt(1 - e2 * std::sin(la) * std::sin(la));
+     const Vector gp(nn * std::cos(la) * std::cos(lo), nn * std::cos(la) * std::sin(lo), nn * (1 - e2) * std::sin(la));
+-    const Vector sp = g.satMob[s]->GetEcefPosition();
++    Vector sp, sv;
++    if (offset == 0.0)
++    {
++        sp = g.satMob[s]->GetEcefPosition();
++    }
++    else
++    {
++        g.satMob[s]->GetEcefStateAt(Seconds(offset), sp, sv);
++    }
+     const Vector d(sp.x - gp.x, sp.y - gp.y, sp.z - gp.z);
+     const double r = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+     const double up = d.x * std::cos(la) * std::cos(lo) + d.y * std::cos(la) * std::sin(lo) + d.z * std::sin(la);
+     return std::asin(up / r) * 180 / M_PI;
+ }
+ 
++/// Elevation as a gateway would measure it now.
++double
++MeasElev(uint32_t s, uint32_t gs, double offset = 0.0)
++{
++    const double t = ElevDeg(s, gs, offset);
++    return g.elevNoiseDeg > 0 ? t + g.noise->GetValue(0.0, g.elevNoiseDeg * g.elevNoiseDeg) : t;
++}
++
++/// The reading of one link within one decision.
++double
++ReadElev(uint32_t s, uint32_t gs)
++{
++    if (g.elevNoiseDeg <= 0)
++    {
++        return ElevDeg(s, gs);
++    }
++    auto key = std::make_pair(s, gs);
++    auto it = g.elevReading.find(key);
++    if (it != g.elevReading.end())
++    {
++        return it->second;
++    }
++    const double v = MeasElev(s, gs);
++    g.elevReading[key] = v;
++    return v;
++}
++
++/// Central angle (rad) from gateway to sub-satellite point at elevation e (deg), for shell radius r.
++double
++CentralAngle(double eDeg, double r)
++{
++    const double e = eDeg * M_PI / 180;
++    return std::acos(6371000.0 * std::cos(e) / r) - e;
++}
++
++/// Residual time of a ground link estimated from three elevation samples over the last trackArc seconds, with no
++/// orbit: psi^2 of a pass is close to a parabola in time (the satellite crosses the visibility cap along a chord at
++/// constant speed), so a parabola through psi^2 at the three samples gives the time at which psi reaches the drop
++/// elevation. Inter-satellite links are taken not to end (the tracker cannot see them).
++double
++TrackResidual(uint32_t a, uint32_t b)
++{
++    const Edge e = Canon(a, b);
++    if (e.second < g.n)
++    {
++        return g.horizon;
++    }
++    auto it = g.trackCache.find(e);
++    if (it != g.trackCache.end())
++    {
++        return it->second;
++    }
++    ++g.trackEvals;
++    const uint32_t s = e.first, gs = e.second;
++    // Least-squares parabola y(tau) = c0 + c1 tau + c2 tau^2 through trackSamples readings of psi^2 over the arc;
++    // with three samples it passes through them.
++    Vector sp = g.satMob[s]->GetEcefPosition();
++    const double r = std::sqrt(sp.x * sp.x + sp.y * sp.y + sp.z * sp.z);
++    const uint32_t N = std::max<uint32_t>(3, g.trackSamples);
++    double S[5] = {0, 0, 0, 0, 0}, Y[3] = {0, 0, 0};
++    for (uint32_t k = 0; k < N; ++k)
++    {
++        const double tau = -g.trackArc * k / (N - 1);
++        const double p = CentralAngle(MeasElev(s, gs, tau), r);
++        const double y = p * p;
++        double tk = 1.0;
++        for (int q = 0; q < 5; ++q)
++        {
++            S[q] += tk;
++            if (q < 3)
++            {
++                Y[q] += tk * y;
++            }
++            tk *= tau;
++        }
++    }
++    // normal equations, Cramer
++    const double D = S[0] * (S[2] * S[4] - S[3] * S[3]) - S[1] * (S[1] * S[4] - S[3] * S[2]) + S[2] * (S[1] * S[3] - S[2] * S[2]);
++    const double c0 = (Y[0] * (S[2] * S[4] - S[3] * S[3]) - S[1] * (Y[1] * S[4] - S[3] * Y[2]) + S[2] * (Y[1] * S[3] - S[2] * Y[2])) / D;
++    const double B = (S[0] * (Y[1] * S[4] - S[3] * Y[2]) - Y[0] * (S[1] * S[4] - S[3] * S[2]) + S[2] * (S[1] * Y[2] - Y[1] * S[2])) / D;
++    const double C = (S[0] * (S[2] * Y[2] - Y[1] * S[3]) - S[1] * (S[1] * Y[2] - Y[1] * S[2]) + Y[0] * (S[1] * S[3] - S[2] * S[2])) / D;
++    const double pd = CentralAngle(g.dropDeg, r);
++    const double A = c0 - pd * pd; // A + B t + C t^2 = 0 at the drop
++    double res = 0.0;
++    if (A < 0 && C > 0)
++    {
++        res = (-B + std::sqrt(std::max(0.0, B * B - 4 * A * C))) / (2 * C);
++    }
++    else if (A < 0)
++    {
++        ++g.trackBad; // the arc does not fix a pass: a falling reading extrapolates linearly, a rising one is taken as lasting
++        res = B > 0 ? -A / B : g.horizon;
++    }
++    res = std::min(res, g.horizon);
++    g.trackCache[e] = res;
++    return res;
++}
++
++/// One-way delay (m of path length) of route p at the given offset from now, from the ephemeris.
++double
++RouteLengthAt(const std::vector<uint32_t>& p, double offset)
++{
++    auto posOf = [&](uint32_t v) {
++        Vector x, u;
++        if (v < g.n)
++        {
++            if (offset == 0.0)
++            {
++                x = g.satMob[v]->GetEcefPosition();
++            }
++            else
++            {
++                g.satMob[v]->GetEcefStateAt(Seconds(offset), x, u);
++            }
++            return x;
++        }
++        const int k = v == g.gsA ? 0 : 1;
++        const double la = g.gsLat[k] * M_PI / 180, lo = g.gsLon[k] * M_PI / 180;
++        const double a = 6378137.0, e2 = 6.69437999014e-3;
++        const double nn = a / std::sqrt(1 - e2 * std::sin(la) * std::sin(la));
++        return Vector(nn * std::cos(la) * std::cos(lo), nn * std::cos(la) * std::sin(lo), nn * (1 - e2) * std::sin(la));
++    };
++    double L = 0;
++    Vector prev = posOf(p[0]);
++    for (size_t k = 1; k < p.size(); ++k)
++    {
++        const Vector c = posOf(p[k]);
++        const double dx = c.x - prev.x, dy = c.y - prev.y, dz = c.z - prev.z;
++        L += std::sqrt(dx * dx + dy * dy + dz * dz);
++        prev = c;
++    }
++    return L;
++}
++
+ /// Elevation-trigger policy (no ephemeris): every dt, if the satellite at either end of the route has sunk
+ /// below the trigger, move to the shortest route over ground links above the trigger; the old link stays up
+ /// until it sinks below the drop elevation, so the switch is make before break when the trigger is above it.
+@@ -301,7 +591,7 @@
+     if (g.path.size() >= 3)
+     {
+         const uint32_t sA = g.path[1], sB = g.path[g.path.size() - 2];
+-        if (ElevDeg(sA, g.gsA) < g.trigger || ElevDeg(sB, g.gsB) < g.trigger)
++        if (MeasElev(sA, g.gsA) < g.trigger || MeasElev(sB, g.gsB) < g.trigger)
+         {
+             Recompute();
+         }
+@@ -320,12 +610,135 @@
+ Recompute()
+ {
+     ++g.computations;
++    g.elevReading.clear();
+     std::vector<uint32_t> p;
+-    if (g.policy == "life")
++    auto lifeOf = [](const std::vector<uint32_t>& q) {
++        double l = g.horizon;
++        for (size_t k = 0; k + 1 < q.size(); ++k)
++        {
++            l = std::min(l, Residual(q[k], q[k + 1]));
++        }
++        return l;
++    };
++    if (g.policy == "track")
+     {
+-        auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.eps, &Residual, g.guard + g.tAcq);
++        // Algorithm 1 fed by the elevation track, switched by the elevation trigger (ElevCheck)
++        g.trackCache.clear();
++        const double t0 = ThreadCpu();
++        auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.eps, &TrackResidual, g.guard + 2 * g.tAcq);
++        g.searchCpu += ThreadCpu() - t0;
++        ++g.searchN;
+         g.dijkstra += lp.dijkstra_runs;
+         p = lp.path;
++    }
++    else if (g.policy == "alpr")
++    {
++        // Bhattacharjee et al., Algorithm 2 and eq. (13) with eta_s = tAcq and 1 s slots: edge-disjoint shortest routes,
++        // each scored by (eta_s + sum of delays over the slots it exists) / slots; the lowest is kept until it ends.
++        std::set<Edge> removed;
++        std::vector<std::vector<uint32_t>> cand;
++        const size_t nr = std::min(g.router->Neighbours(g.gsA).size(), g.router->Neighbours(g.gsB).size());
++        for (size_t k = 0; k < nr; ++k)
++        {
++            auto wp = g.router->ShortestPathWeightedFiltered(g.gsA, g.gsB, [&](uint32_t a, uint32_t b) {
++                return !removed.count(Canon(a, b));
++            });
++            ++g.dijkstra;
++            if (wp.path.empty())
++            {
++                break;
++            }
++            for (size_t q = 0; q + 1 < wp.path.size(); ++q)
++            {
++                removed.insert(Canon(wp.path[q], wp.path[q + 1]));
++            }
++            cand.push_back(wp.path);
++        }
++        double best = std::numeric_limits<double>::infinity();
++        double bestL = 0;
++        for (const auto& c : cand)
++        {
++            const double l = lifeOf(c);
++            if (l <= g.guard + 2 * g.tAcq && cand.size() > 1 && c != cand.back())
++            {
++                continue; // cannot be switched to in time
++            }
++            double sum = 0;
++            for (int q = 0; q < 5; ++q)
++            {
++                sum += RouteLengthAt(c, l * (q + 0.5) / 5) / kC;
++            }
++            const double score = (g.tAcq + (sum / 5) * std::max(1.0, std::floor(l))) / std::max(1.0, std::floor(l));
++            if (score < best)
++            {
++                best = score;
++                p = c;
++                bestL = l;
++            }
++        }
++        if (!p.empty() && g.proactive)
++        {
++            const double wait = bestL - g.guard - g.tAcq;
++            Schedule(wait > 1e-3 ? wait : 0.5);
++        }
++    }
++    else if (g.policy == "isasr")
++    {
++        // Bhattacharjee et al., Algorithm 3 and eq. (14)-(15) with eta_s = tAcq, 1 s slots, gamma = gammaIsasr, on the
++        // +Grid topology: an edge of the active route has no activeness cost; an inter-satellite link that outlives the
++        // horizon has no stability cost and, being permanent, no activeness cost either. Until the active route's break
++        // point its edges keep cost_act = 0; at the break point (here g + tAcq before it) all edges carry eta_s.
++        const double etaS = std::max(g.tAcq, 1e-3);
++        const double lActive = PathUp(g.path) ? lifeOf(g.path) : 0.0;
++        const bool atBreak = !g.path.empty() && lActive <= g.guard + g.tAcq + 1.0; // one slot of margin
++        if (atBreak)
++        {
++            for (const Edge& pe : g.pathEdges)
++            {
++                g.isasrZeroAct.erase(pe);
++            }
++        }
++        const std::set<Edge>& active = g.isasrZeroAct;
++        auto wp = g.router->ShortestPathCost(g.gsA, g.gsB, [&](uint32_t a, uint32_t b, double w) {
++            const Edge e = Canon(a, b);
++            const double res = Residual(a, b);
++            if (e.second < g.n && res >= g.horizon)
++            {
++                // permanent +Grid link: l = N in eq. (15), so no stability cost. With isasrIslAct its activeness cost follows
++                // Algorithm 3 (eta_s until it serves an active route); without it, as in our variant, it costs nothing.
++                return g.isasrIslAct && !active.count(e) ? w + g.gammaIsasr * kC * etaS : w;
++            }
++            if (res <= g.guard + 2 * g.tAcq && !active.count(e))
++            {
++                return std::numeric_limits<double>::infinity();
++            }
++            const double costSt = etaS / std::max(1.0, std::floor(res));
++            const double costAct = active.count(e) ? 0.0 : etaS;
++            return w + g.gammaIsasr * kC * (costSt + costAct); // weights are in meters of path; costs converted by c
++        });
++        ++g.dijkstra;
++        p = wp.path;
++        if (!p.empty() && lifeOf(p) > g.guard + g.tAcq + 1.0)
++        {
++            for (size_t q = 0; q + 1 < p.size(); ++q)
++            {
++                g.isasrZeroAct.insert(Canon(p[q], p[q + 1]));
++            }
++        }
++        Schedule(1.0);
++    }
++    else if (g.policy == "life")
++    {
++        const double t0 = ThreadCpu();
++        auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.eps, &Residual, g.guard + 2 * g.tAcq);
++        g.searchCpu += ThreadCpu() - t0;
++        ++g.searchN;
++        g.dijkstra += lp.dijkstra_runs;
++        if (lp.lifetime_s <= g.guard + 2 * g.tAcq)
++        {
++            ++g.noAdmissible;
++        }
++        p = lp.path;
+         if (!p.empty())
+         {
+             // when no route outlives the guard the search returns the dying shortest route; look again in half a
+@@ -382,18 +795,18 @@
+         auto base = g.router->ShortestPathWeightedFiltered(g.gsA, g.gsB, [](uint32_t a, uint32_t b) {
+             if (a >= g.n && b >= g.n) return false;
+             if (a < g.n && b < g.n) return true;
+-            return ElevDeg(std::min(a, b), std::max(a, b)) >= g.trigger;
++            return ReadElev(std::min(a, b), std::max(a, b)) >= g.trigger;
+         });
+         ++g.dijkstra;
+         p = base.path;
+         if (!base.path.empty())
+         {
+-            for (double floorDeg = 85.0; floorDeg > g.trigger; floorDeg -= 5.0)
++            for (double floorDeg = 85.0; floorDeg > g.trigger; floorDeg -= g.floorGrid)
+             {
+                 auto wp = g.router->ShortestPathWeightedFiltered(g.gsA, g.gsB, [floorDeg](uint32_t a, uint32_t b) {
+                     if (a >= g.n && b >= g.n) return false;
+                     if (a < g.n && b < g.n) return true;
+-                    return ElevDeg(std::min(a, b), std::max(a, b)) >= floorDeg;
++                    return ReadElev(std::min(a, b), std::max(a, b)) >= floorDeg;
+                 });
+                 ++g.dijkstra;
+                 if (!wp.path.empty() && wp.total_weight <= (1.0 + g.eps) * base.total_weight)
+@@ -421,7 +834,7 @@
+                 return true; // inter-satellite link
+             }
+             const uint32_t s = std::min(a, b), gs = std::max(a, b);
+-            return ElevDeg(s, gs) >= g.trigger;
++            return ReadElev(s, gs) >= g.trigger;
+         });
+         ++g.dijkstra;
+         if (wp.path.empty())
+@@ -431,16 +844,34 @@
+         }
+         p = wp.path;
+     }
+-    else if (g.policy == "asr")
++    else if (g.policy == "asr" || g.policy == "asrk")
+     {
++        if (g.policy == "asrk" && PathUp(g.path) && lifeOf(g.path) >= g.window + g.tAcq)
++        {
++            // keep a route that still lasts the window, while its stretch is within the keep bound
++            double w = 0;
++            for (size_t k = 0; k + 1 < g.path.size(); ++k)
++            {
++                w += g.router->EdgeWeight(g.path[k], g.path[k + 1]);
++            }
++            const double best = g.router->ShortestPathWeighted(g.gsA, g.gsB).total_weight;
++            ++g.dijkstra;
++            if (w <= (1.0 + g.keepEps) * best)
++            {
++                Schedule(g.window);
++                return;
++            }
++        }
+         auto wp = g.router->ShortestPathWeightedFiltered(g.gsA, g.gsB, [](uint32_t a, uint32_t b) {
+             return Residual(a, b) >= g.window + g.tAcq;
+         });
+         ++g.dijkstra;
++        ++g.mergedDecisions;
+         if (wp.path.empty())
+         {
+-            // nothing lasts the window: fall back to the longest-lived route, and repair it on a break (OnDown)
+-            auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, 1e9, &Residual, g.guard + g.tAcq);
++            ++g.fallbackUsed;
++            // nothing lasts the window: fall back to the longest-lived route within fallbackEps, repair on a break (OnDown)
++            auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.fallbackEps, &Residual, g.guard + 2 * g.tAcq);
+             g.dijkstra += lp.dijkstra_runs;
+             wp.path = lp.path;
+         }
+@@ -461,6 +892,7 @@
+         Schedule(0.5); // no route now: retry shortly
+         return;
+     }
++    Log("decide " + PathStr(p));
+     if (g.path.empty())
+     {
+         InstallPath(p); // the first route is in place before traffic starts
+@@ -474,14 +906,31 @@
+ {
+     const Edge e = Canon(ev.node_a, ev.node_b);
+     g.endCache.erase(e);
++    g.satCache.erase(e);
+     auto it = g.links.find(e);
+-    if (it != g.links.end())
++    if (it != g.links.end() && !g.blocked.count(e))
+     {
+         it->second.emA->SetRate(0.0);
+         it->second.emB->SetRate(0.0);
+     }
+ }
+ 
++/// The acquisition has finished: terminals that were blocked serve their links again if those are still up.
++void
++Unblock()
++{
++    for (const Edge& e : g.blocked)
++    {
++        auto it = g.links.find(e);
++        if (it != g.links.end() && g.router->HasEdge(e.first, e.second))
++        {
++            it->second.emA->SetRate(0.0);
++            it->second.emB->SetRate(0.0);
++        }
++    }
++    g.blocked.clear();
++}
++
+ void
+ OnUpdate(ContactEvent ev)
+ {
+@@ -504,6 +953,7 @@
+ {
+     const Edge e = Canon(ev.node_a, ev.node_b);
+     g.endCache.erase(e);
++    g.satCache.erase(e);
+     auto it = g.links.find(e);
+     if (it != g.links.end())
+     {
+@@ -515,9 +965,12 @@
+         return;
+     }
+     ++g.pathBreaks;
++    (e.second == g.gsA ? g.breaksIn : e.second == g.gsB ? g.breaksOut : g.breaksIsl)++;
++    Log("break " + std::to_string(e.first) + "-" + std::to_string(e.second));
+     // A link of the active path dropped. Every policy except snap and asr
+     // reacts; life only gets here if its prediction missed.
+-    if (g.policy == "ondemand" || g.policy == "elev" || g.policy == "elevb" || g.policy == "asr")
++    if (g.policy == "ondemand" || g.policy == "elev" || g.policy == "elevb" || g.policy == "asr" ||
++        g.policy == "asrk" || g.policy == "track" || g.policy == "alpr")
+     {
+         Schedule(g.detect); // the new ground link is then acquired in Switch, as for every policy
+     }
+@@ -549,11 +1002,14 @@
+         if (std::isfinite(best) && best > 0)
+         {
+             g.stretch.push_back(w / best - 1.0);
++            g.routeLenSum += w;
++            ++g.routeLenN;
+             if (g.hold)
+             {
+                 ++g.dijkstra; // the hold check needs this shortest path
+-                if (w / best - 1.0 > g.eps)
++                if (w / best - 1.0 > g.eps && !g.pendingInstall.IsPending())
+                 {
++                    ++g.holdSwitches;
+                     Schedule(0.0);
+                 }
+             }
+@@ -566,7 +1022,7 @@
+ DumpReach(double dt)
+ {
+     // The longest admissible lifetime available now, for the offline optimum of (P1).
+-    auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.eps, &Residual, g.guard + g.tAcq);
++    auto lp = g.router->LifetimeAwarePath(g.gsA, g.gsB, g.eps, &Residual, g.guard + 2 * g.tAcq);
+     const double best = g.router->ShortestPathWeighted(g.gsA, g.gsB).total_weight;
+     g.reach << Simulator::Now().GetSeconds() << "," << (lp.path.empty() ? 0.0 : lp.lifetime_s) << ","
+             << lp.total_weight << "," << best << "\n";
+@@ -650,6 +1106,25 @@
+     cmd.AddValue("crossLatDeg", "cross-plane ISLs off above this latitude (deg), 0 = never", crossLat);
+     std::string reachOut;
+     cmd.AddValue("reachOut", "write the longest admissible lifetime every second to this CSV", reachOut);
++    cmd.AddValue("noData", "control plane only: no IP stack, no packets (same decisions, loss not measured)", g.noData);
++    cmd.AddValue("bbm", "one terminal per gateway: old ground link stops when acquisition starts", g.bbm);
++    cmd.AddValue("fallbackEps", "asr, asrk: stretch bound of the longest-lived fallback route", g.fallbackEps);
++    cmd.AddValue("keepEps", "asrk: keep a route only while its stretch is within this", g.keepEps);
++    cmd.AddValue("trackArc", "track: arc of the elevation track (s)", g.trackArc);
++    cmd.AddValue("gamma", "isasr: gamma of eq. (14), dimensionless", g.gammaIsasr);
++    cmd.AddValue("isasrIslAct", "isasr: activeness cost on inter-satellite links too, as in Algorithm 3", g.isasrIslAct);
++    cmd.AddValue("proactive", "alpr: start the switch before the known end of the route", g.proactive);
++    cmd.AddValue("elevNoiseDeg", "standard deviation of measured elevation per reading (deg)", g.elevNoiseDeg);
++    cmd.AddValue("trackSamples", "track: readings over the arc, fitted by least squares", g.trackSamples);
++    cmd.AddValue("floorGrid", "elevb: grid of the elevation floor (deg)", g.floorGrid);
++    cmd.AddValue("logEvents", "print decisions, installs and breaks to stderr", g.logEvents);
++    double islRefresh = 1.0;
++    cmd.AddValue("islRefresh", "refresh interval of inter-satellite ranges (s), 0 = every tick", islRefresh);
++    std::string tleFile, edgeFile;
++    double epochUnix = 1792800000.0;
++    cmd.AddValue("tle", "real shell: TLE file (3-line sets), propagated with Vallado SGP4", tleFile);
++    cmd.AddValue("edges", "real shell: +Grid candidates, lines 'a b cross'", edgeFile);
++    cmd.AddValue("epochUnix", "Unix time of simulation start before startOffset", epochUnix);
+     cmd.Parse(argc, argv);
+ 
+     // ---- shell
+@@ -660,7 +1135,16 @@
+     wc.inclination_deg = inc;
+     wc.altitude_km = altKm;
+     wc.epoch_unix_s = 1792800000.0; // 2026-10-24
+-    const auto els = star ? WalkerConstellation::BuildStar(wc) : WalkerConstellation::BuildDelta(wc);
++    auto els = star ? WalkerConstellation::BuildStar(wc) : WalkerConstellation::BuildDelta(wc);
++    std::vector<ns3::ntncon::TleRecord> tles;
++    if (!tleFile.empty())
++    {
++        std::ifstream tf(tleFile);
++        std::stringstream body;
++        body << tf.rdbuf();
++        ns3::ntncon::ParseTleStream(body.str(), tles);
++        els.assign(tles.size(), els[0]);
++    }
+     g.n = els.size();
+     g.gsA = g.n;
+     g.gsB = g.n + 1;
+@@ -672,8 +1156,18 @@
+     for (uint32_t k = 0; k < g.n; ++k)
+     {
+         auto m = CreateObject<Sgp4MobilityModel>();
+-        m->SetElements(els[k]);
+-        m->SetSimulationEpochUnix(wc.epoch_unix_s + startOffset);
++        if (tles.empty())
++        {
++            m->SetElements(els[k]);
++            m->SetSimulationEpochUnix(wc.epoch_unix_s + startOffset);
++        }
++        else
++        {
++            m->SetTle(tles[k]);
++            m->SetUseVallado(true);
++            NS_ABORT_MSG_IF(!m->IsUsingSgp4(), "SGP4 init failed for satellite " << k);
++            m->SetSimulationEpochUnix(epochUnix + startOffset);
++        }
+         sats.push_back(m);
+         g.sched->RegisterSatellite(k, m);
+     }
+@@ -687,6 +1181,21 @@
+     // shell has no link across its counter-rotating seam).
+     std::vector<Edge> isl;
+     std::set<Edge> cross;
++    if (!edgeFile.empty())
++    {
++        std::ifstream ef(edgeFile);
++        uint32_t a, b;
++        int isCross;
++        while (ef >> a >> b >> isCross)
++        {
++            isl.push_back(Canon(a, b));
++            if (isCross)
++            {
++                cross.insert(isl.back());
++            }
++        }
++    }
++    else
+     for (uint32_t p = 0; p < planes; ++p)
+     {
+         for (uint32_t s = 0; s < perPlane; ++s)
+@@ -768,12 +1277,23 @@
+         }
+     }
+ 
++    g.sched->SetGslCandidates(gsl);
++    g.noise = CreateObject<NormalRandomVariable>();
++    // Inter-satellite ranges move slowly and no +Grid link drops under the range cap, so they are refreshed every
++    // islRefresh seconds; with a latitude cutoff the links do drop, so those runs sample on every tick.
++    g.sched->SetIslRefreshEvery(crossLat > 0 || islRefresh <= 0 ? 1 : static_cast<uint32_t>(std::lround(islRefresh / tick)));
++    g.dropDeg = minElev - 2.0;
++    g.horizon = 1800.0;
++
+     // ---- data plane
+-    g.nodes.Create(g.n + 2);
+     InternetStackHelper stack;
+     Ipv4StaticRoutingHelper srh;
++    if (!g.noData)
++    {
++    g.nodes.Create(g.n + 2);
+     stack.SetRoutingHelper(srh);
+     stack.Install(g.nodes);
++    }
+     PointToPointHelper p2p;
+     p2p.SetDeviceAttribute("DataRate", StringValue("100Mbps"));
+     p2p.SetChannelAttribute("Delay", TimeValue(MilliSeconds(5)));
+@@ -800,6 +1320,8 @@
+         l.ipB = ic.GetAddress(1);
+         g.links[e] = l;
+     };
++    if (!g.noData)
++    {
+     for (const auto& e : isl)
+     {
+         mk(e);
+@@ -808,6 +1330,7 @@
+     {
+         mk(e);
+     }
++    }
+     // Destination address: B's address on its first ground link.
+     for (const auto& [e, l] : g.links)
+     {
+@@ -827,26 +1350,29 @@
+ 
+     // ---- traffic
+     const uint16_t port = 9000;
++    const double t0 = 5.0;
++    const uint64_t nPk = static_cast<uint64_t>((duration - t0) * rate);
++    if (!g.noData)
++    {
+     PacketSinkHelper sinkH("ns3::UdpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), port));
+     auto sinkApp = sinkH.Install(g.nodes.Get(g.gsB));
+     sinkApp.Get(0)->TraceConnectWithoutContext("Rx", MakeCallback(&OnRx));
+     sinkApp.Start(Seconds(0));
+     UdpClientHelper cli(g.dst, port);
+-    const double t0 = 5.0;
+-    const uint64_t nPk = static_cast<uint64_t>((duration - t0) * rate);
+     cli.SetAttribute("MaxPackets", UintegerValue(nPk));
+     cli.SetAttribute("Interval", TimeValue(Seconds(1.0 / rate)));
+     cli.SetAttribute("PacketSize", UintegerValue(200));
+     auto cliApp = cli.Install(g.nodes.Get(g.gsA));
+     cliApp.Start(Seconds(t0));
+     cliApp.Stop(Seconds(duration));
++    }
+ 
+     // Snapshot routing starts at a random phase of its clock, so its recomputations are not locked to
+     // the contact sampler's ticks; the other policies start right after the first contacts are known.
+     Ptr<UniformRandomVariable> phase = CreateObject<UniformRandomVariable>();
+     Simulator::Schedule(Seconds(2 * tick + (g.policy == "snap" ? phase->GetValue(0, g.period) : 1e-3)),
+                         &Recompute);
+-    if (g.policy == "elev" || g.policy == "elevb")
++    if (g.policy == "elev" || g.policy == "elevb" || g.policy == "track")
+     {
+         Simulator::Schedule(Seconds(2 * tick + 0.5), &ElevCheck, 0.5);
+     }
+@@ -854,6 +1380,9 @@
+     // Count only from the start of traffic, so the rates per hour are over the measured span.
+     Simulator::Schedule(Seconds(t0), []() {
+         g.changes = g.pathBreaks = g.computations = g.dijkstra = g.predictions = g.forced = 0;
++        g.ingressChanges = g.egressChanges = g.islOnlyChanges = g.acquisitions = 0;
++        g.breaksIn = g.breaksOut = g.breaksIsl = g.holdSwitches = g.ageN = g.resN = g.searchN = g.noAdmissible = g.trackBad = g.fallbackUsed = g.mergedDecisions = 0;
++        g.ageSum = g.resInSum = g.resOutSum = g.searchCpu = 0.0;
+     });
+     if (!reachOut.empty())
+     {
+@@ -867,7 +1396,31 @@
+     const double hours = (duration - t0) / 3600.0;
+     std::ostringstream js;
+     js.precision(6);
+-    js << "{\"ver\":3,\"policy\":\"" << g.policy << "\",\"eps\":" << g.eps << ",\"period\":" << g.period
++    rusage ru;
++    getrusage(RUSAGE_SELF, &ru);
++    auto shareOver = [](double x) {
++        return g.stretch.empty() ? NAN
++                                 : static_cast<double>(std::count_if(g.stretch.begin(), g.stretch.end(),
++                                                                     [x](double v) { return v > x; })) /
++                                       g.stretch.size();
++    };
++    js << "{\"ver\":7,\"bbm\":" << g.bbm << ",\"no_data\":" << g.noData
++       << ",\"ingress_per_h\":" << g.ingressChanges / hours << ",\"egress_per_h\":" << g.egressChanges / hours
++       << ",\"isl_only_per_h\":" << g.islOnlyChanges / hours << ",\"acq_per_h\":" << g.acquisitions / hours
++       << ",\"breaks_in_per_h\":" << g.breaksIn / hours << ",\"breaks_out_per_h\":" << g.breaksOut / hours
++       << ",\"breaks_isl_per_h\":" << g.breaksIsl / hours << ",\"hold_per_h\":" << g.holdSwitches / hours
++       << ",\"age_mean_s\":" << (g.ageN ? g.ageSum / g.ageN : NAN)
++       << ",\"res_in_mean_s\":" << (g.resN ? g.resInSum / g.resN : NAN)
++       << ",\"res_out_mean_s\":" << (g.resN ? g.resOutSum / g.resN : NAN)
++       << ",\"search_cpu_ms\":" << (g.searchN ? 1e3 * g.searchCpu / g.searchN : NAN)
++       << ",\"stretch_p50\":" << Pct(g.stretch, 0.5) << ",\"stretch_p95\":" << Pct(g.stretch, 0.95)
++       << ",\"stretch_max\":" << Pct(g.stretch, 1.0) << ",\"over5\":" << shareOver(0.05)
++       << ",\"over10\":" << shareOver(0.10) << ",\"cpu_s\":" << ru.ru_utime.tv_sec + 1e-6 * ru.ru_utime.tv_usec
++       << ",\"no_admissible\":" << g.noAdmissible << ",\"track_bad\":" << g.trackBad
++       << ",\"fallback_share\":" << (g.mergedDecisions ? static_cast<double>(g.fallbackUsed) / g.mergedDecisions : NAN)
++       << ",\"route_ms_mean\":" << (g.routeLenN ? 1e3 * g.routeLenSum / g.routeLenN / kC : NAN)
++       << ",\"propagator\":\"" << (sats[0]->IsUsingSgp4() ? "sgp4" : "kepler-j2") << "\"";
++    js << ",\"policy\":\"" << g.policy << "\",\"eps\":" << g.eps << ",\"period\":" << g.period
+        << ",\"tacq\":" << g.tAcq << ",\"guard\":" << g.guard << ",\"hold\":" << g.hold
+        << ",\"pred_sigma_km\":" << predSigmaKm << ",\"cross_lat\":" << crossLat
+        << ",\"window\":" << g.window << ",\"start\":" << startOffset << ",\"sats\":" << g.n

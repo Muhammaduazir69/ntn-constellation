@@ -1,0 +1,146 @@
+{
+ "kuiper_lon-nyc_169873": {
+  "opt_per_h": 32.0,
+  "greedy_per_h": 32.0
+ },
+ "kuiper_lon-nyc_218123": {
+  "opt_per_h": 33.333333333333336,
+  "greedy_per_h": 33.333333333333336
+ },
+ "kuiper_lon-nyc_402656": {
+  "opt_per_h": 32.0,
+  "greedy_per_h": 32.0
+ },
+ "kuiper_lon-nyc_410162": {
+  "opt_per_h": 32.0,
+  "greedy_per_h": 32.0
+ },
+ "kuiper_lon-nyc_529666": {
+  "opt_per_h": 30.666666666666668,
+  "greedy_per_h": 30.666666666666668
+ },
+ "kuiper_lon-nyc_846197": {
+  "opt_per_h": 30.666666666666668,
+  "greedy_per_h": 30.666666666666668
+ },
+ "kuiper_syd-lax_169873": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "kuiper_syd-lax_218123": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "kuiper_syd-lax_402656": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "kuiper_syd-lax_410162": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "kuiper_syd-lax_529666": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "kuiper_syd-lax_846197": {
+  "opt_per_h": 18.666666666666668,
+  "greedy_per_h": 18.666666666666668
+ },
+ "oneweb_lon-nyc_169873": {
+  "opt_per_h": 14.666666666666666,
+  "greedy_per_h": 14.666666666666666
+ },
+ "oneweb_lon-nyc_218123": {
+  "opt_per_h": 14.666666666666666,
+  "greedy_per_h": 17.333333333333332
+ },
+ "oneweb_lon-nyc_402656": {
+  "opt_per_h": 14.666666666666666,
+  "greedy_per_h": 14.666666666666666
+ },
+ "oneweb_lon-nyc_410162": {
+  "opt_per_h": 13.333333333333334,
+  "greedy_per_h": 13.333333333333334
+ },
+ "oneweb_lon-nyc_529666": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "oneweb_lon-nyc_846197": {
+  "opt_per_h": 20.0,
+  "greedy_per_h": 20.0
+ },
+ "oneweb_syd-lax_169873": {
+  "opt_per_h": 10.666666666666666,
+  "greedy_per_h": 10.666666666666666
+ },
+ "oneweb_syd-lax_218123": {
+  "opt_per_h": 9.333333333333334,
+  "greedy_per_h": 9.333333333333334
+ },
+ "oneweb_syd-lax_402656": {
+  "opt_per_h": 10.666666666666666,
+  "greedy_per_h": 10.666666666666666
+ },
+ "oneweb_syd-lax_410162": {
+  "opt_per_h": 12.0,
+  "greedy_per_h": 12.0
+ },
+ "oneweb_syd-lax_529666": {
+  "opt_per_h": 10.666666666666666,
+  "greedy_per_h": 10.666666666666666
+ },
+ "oneweb_syd-lax_846197": {
+  "opt_per_h": 13.333333333333334,
+  "greedy_per_h": 13.333333333333334
+ },
+ "starlink_lon-nyc_169873": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_lon-nyc_218123": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_lon-nyc_402656": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_lon-nyc_410162": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_lon-nyc_529666": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_lon-nyc_846197": {
+  "opt_per_h": 40.0,
+  "greedy_per_h": 40.0
+ },
+ "starlink_syd-lax_169873": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "starlink_syd-lax_218123": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "starlink_syd-lax_402656": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "starlink_syd-lax_410162": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "starlink_syd-lax_529666": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ },
+ "starlink_syd-lax_846197": {
+  "opt_per_h": 25.333333333333332,
+  "greedy_per_h": 25.333333333333332
+ }
+}

@@ -1,0 +1,266 @@
+[
+{
+"kind": "design",
+"c": [
+"starlink",
+"lon-nyc"
+],
+"pol": "Od",
+"pred": 1.97438375897538,
+"meas": 1.9379633333333333
+},
+{
+"kind": "design",
+"c": [
+"starlink",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 1.5697478878120834,
+"meas": 1.5361149999999997
+},
+{
+"kind": "design",
+"c": [
+"kuiper",
+"lon-nyc"
+],
+"pol": "Od",
+"pred": 1.784773896315845,
+"meas": 1.7824083333333334
+},
+{
+"kind": "design",
+"c": [
+"kuiper",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 1.1469373001816607,
+"meas": 1.12778
+},
+{
+"kind": "design",
+"c": [
+"oneweb",
+"lon-nyc"
+],
+"pol": "Od",
+"pred": 0.8818359738837461,
+"meas": 0.8793218333333334
+},
+{
+"kind": "design",
+"c": [
+"oneweb",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 0.816530148592202,
+"meas": 0.8293210000000001
+},
+{
+"kind": "held",
+"c": [
+"kuiper2",
+"mad-nyc"
+],
+"pol": "Od",
+"pred": 2.48627914837886,
+"meas": 2.456481666666667,
+"measlo": 2.45,
+"meashi": 2.48889
+},
+{
+"kind": "held",
+"c": [
+"kuiper2",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 0.9440286028725176,
+"meas": 0.9203701666666668,
+"measlo": 0.855556,
+"meashi": 0.972222
+},
+{
+"kind": "held",
+"c": [
+"starlink70",
+"mad-nyc"
+],
+"pol": "Od",
+"pred": 0.9343044606481483,
+"meas": 0.9074070000000001,
+"measlo": 0.894444,
+"meashi": 0.9333330000000001
+},
+{
+"kind": "held",
+"c": [
+"starlink70",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 1.0504266855997317,
+"meas": 1.0200639999999999,
+"measlo": 0.9870369999999999,
+"meashi": 1.06667
+},
+{
+"kind": "held",
+"c": [
+"real_starlink16",
+"lon-nyc"
+],
+"pol": "Od",
+"pred": 2.701014403372967,
+"meas": 2.961418333333333,
+"measlo": 2.8000000000000003,
+"meashi": 3.07037
+},
+{
+"kind": "held",
+"c": [
+"real_starlink16",
+"syd-lax"
+],
+"pol": "Od",
+"pred": 1.8001182712454513,
+"meas": 1.7342583333333332,
+"measlo": 1.52963,
+"meashi": 2.21296
+},
+{
+"kind": "design",
+"c": [
+"starlink",
+"lon-nyc"
+],
+"pol": "Snap",
+"pred": 2.564461375751144,
+"meas": 2.5064800000000003
+},
+{
+"kind": "design",
+"c": [
+"starlink",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 2.0350560089557224,
+"meas": 1.987346666666667
+},
+{
+"kind": "design",
+"c": [
+"kuiper",
+"lon-nyc"
+],
+"pol": "Snap",
+"pred": 2.536841841441881,
+"meas": 2.594445
+},
+{
+"kind": "design",
+"c": [
+"kuiper",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 1.0299616054270737,
+"meas": 1.0064816666666667
+},
+{
+"kind": "design",
+"c": [
+"oneweb",
+"lon-nyc"
+],
+"pol": "Snap",
+"pred": 0.6735258188356485,
+"meas": 0.6422838000000001
+},
+{
+"kind": "design",
+"c": [
+"oneweb",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 1.098241902333967,
+"meas": 1.1425916666666667
+},
+{
+"kind": "held",
+"c": [
+"kuiper2",
+"mad-nyc"
+],
+"pol": "Snap",
+"pred": 2.5000985406831426,
+"meas": 2.4617299999999998,
+"measlo": 2.34815,
+"meashi": 2.64074
+},
+{
+"kind": "held",
+"c": [
+"kuiper2",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 0.911986791829369,
+"meas": 0.9382716666666666,
+"measlo": 0.855556,
+"meashi": 1.02963
+},
+{
+"kind": "held",
+"c": [
+"starlink70",
+"mad-nyc"
+],
+"pol": "Snap",
+"pred": 0.3639461561007431,
+"meas": 0.3743826666666667,
+"measlo": 0.335185,
+"meashi": 0.451852
+},
+{
+"kind": "held",
+"c": [
+"starlink70",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 1.144661581580787,
+"meas": 1.15679,
+"measlo": 1.0963,
+"meashi": 1.20556
+},
+{
+"kind": "held",
+"c": [
+"real_starlink16",
+"lon-nyc"
+],
+"pol": "Snap",
+"pred": 4.046789673208369,
+"meas": 4.26759,
+"measlo": 3.9185200000000004,
+"meashi": 4.57407
+},
+{
+"kind": "held",
+"c": [
+"real_starlink16",
+"syd-lax"
+],
+"pol": "Snap",
+"pred": 1.8174800908599305,
+"meas": 1.787655,
+"measlo": 1.61852,
+"meashi": 2.44074
+}
+]

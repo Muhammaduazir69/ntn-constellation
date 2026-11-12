@@ -1,0 +1,44 @@
+{
+ "starlink": {
+  "sats": 3296,
+  "planes": 115,
+  "per_plane_min": 3,
+  "per_plane_max": 65,
+  "alt_km": 462.7250711820768,
+  "inc_mean": 53.15927202669902,
+  "edges": 6480,
+  "cross": 3184,
+  "components": 1,
+  "largest_component": 3296,
+  "max_range_km": 13666.108858501128,
+  "median_range_km": 606.1046975513308
+ },
+ "oneweb": {
+  "sats": 646,
+  "planes": 12,
+  "per_plane_min": 50,
+  "per_plane_max": 61,
+  "alt_km": 1201.7658276952989,
+  "inc_mean": 87.90560572755417,
+  "edges": 1190,
+  "cross": 544,
+  "components": 1,
+  "largest_component": 646,
+  "max_range_km": 2914.697077894833,
+  "median_range_km": 1052.319016092962
+ },
+ "starlink16": {
+  "sats": 3350,
+  "planes": 116,
+  "per_plane_min": 3,
+  "per_plane_max": 64,
+  "alt_km": 462.70963195376476,
+  "inc_mean": 53.15919265671642,
+  "edges": 6593,
+  "cross": 3243,
+  "components": 1,
+  "largest_component": 3350,
+  "max_range_km": 13667.8684712405,
+  "median_range_km": 590.1627631399829
+ }
+}
