@@ -427,9 +427,20 @@ class Sgp4GeocentricContractTest : public TestCase
         // The elevation the channel model forms must be a real elevation.
         auto gs = CreateObject<GeocentricConstantPositionMobilityModel>();
         gs->SetGeographicPosition(Vector(45.0, 0.0, 0.0));
+        // Since ns-3.49 (#1308) the elevation is signed: negative below the horizon (the NTN
+        // loss models then return their defined large loss, #1354). Check it is a real angle and
+        // that its sign agrees with the geometry: the satellite is above the station's horizon
+        // iff (sat - gs) points away from the Earth at the station.
         const double elev = gs->GetElevationAngle(sat);
-        NS_TEST_ASSERT_MSG_GT(elev, 0.0, "elevation must be positive and finite");
+        NS_TEST_ASSERT_MSG_EQ(std::isfinite(elev), true, "elevation must be finite");
+        NS_TEST_ASSERT_MSG_GT(elev, -90.001, "elevation cannot be below the nadir");
         NS_TEST_ASSERT_MSG_LT(elev, 90.001, "elevation cannot exceed the zenith");
+        const Vector pg = gs->GetGeocentricPosition();
+        const Vector ps = sat->GetGeocentricPosition();
+        const Vector d = ps - pg;
+        const double up = (pg.x * d.x + pg.y * d.y + pg.z * d.z);
+        NS_TEST_ASSERT_MSG_EQ((elev > 0.0), (up > 0.0),
+                              "the elevation sign must match the satellite's side of the horizon");
 
         Simulator::Destroy();
     }
@@ -2161,7 +2172,7 @@ class SatLinkErrorModelBlerTest : public TestCase
 {
   public:
     SatLinkErrorModelBlerTest()
-        : TestCase("NtnSatLinkErrorModel C/N0 -> BLER (replaces binary gate)")
+        : TestCase("NtnSatLinkErrorModel C-N0 -> BLER (replaces binary gate)")
     {
     }
 
@@ -3030,9 +3041,15 @@ class GeocentricAdapterElevationTest : public TestCase
         GlobalValue::Bind("GeocentricElevationModel", StringValue("Legacy"));
         NS_TEST_ASSERT_MSG_EQ_TOL(fixedUe, ref, 0.01, "elevation at the terminal");
         NS_TEST_ASSERT_MSG_EQ_TOL(fixedSat, ref, 0.01, "same value whichever end is asked");
-        NS_TEST_ASSERT_MSG_GT(std::abs(legacy - ref), 2.0,
-                              "the stock convention measures at the satellite here (documented "
-                              "reason for the opt-in patch)");
+        // ns-3.49 (#1308) measures the stock elevation at the lower terminal about its radial
+        // vertical (it measured at the satellite before, > 2 deg off here, the reason for the
+        // opt-in patch). What remains is the radial vs geodetic normal at 45 deg latitude
+        // (~0.19 deg); Wgs84LowerEnd removes it.
+        NS_TEST_ASSERT_MSG_LT(std::abs(legacy - ref), 0.5,
+                              "ns-3.49 stock elevation is measured at the terminal");
+        NS_TEST_ASSERT_MSG_LT(std::abs(fixedUe - ref),
+                              std::abs(legacy - ref),
+                              "the WGS-84 option is still the closer one");
     }
 };
 

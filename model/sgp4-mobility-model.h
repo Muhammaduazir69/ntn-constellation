@@ -76,6 +76,11 @@ class Sgp4MobilityModel : public GeocentricConstantPositionMobilityModel
 {
   public:
     static TypeId GetTypeId();
+    /// ns-3.48: copy for MobilityModel::Copy() (spectrum wraparound); keeps the dynamics.
+    Ptr<MobilityModel> Copy() const override
+    {
+        return CreateObject<Sgp4MobilityModel>(*this);
+    }
     Sgp4MobilityModel();
     ~Sgp4MobilityModel() override = default;
 
